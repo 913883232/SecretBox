@@ -1,6 +1,6 @@
 # EdgeOne 后端部署说明
 
-本目录是部署到**腾讯云 EdgeOne Pages** 的生产后端（Pages Function + KV 存储）。
+本目录是部署到**腾讯云 EdgeOne Pages** 的生产后端（Pages Function + Blob 存储）。
 它和仓库里的 Next.js 版（`src/`）逻辑完全一致，只是运行环境不同。
 
 > 目标：**只用 EdgeOne，不依赖任何第三方数据库或服务器。**
@@ -13,7 +13,7 @@ functions/
     [[path]].js     ← EdgeOne 入口（catch-all，匹配所有 /api/*）
 edgeone/
   lib/
-    router.js       ← 后端核心：KV 封装 + 密码哈希 + 会话 + 路由分发
+    router.js       ← 后端核心：Blob 封装 + 密码哈希 + 会话 + 路由分发
   README.md         ← 本文件
 ```
 
@@ -30,13 +30,7 @@ node scripts/export-static.mjs
 # 产物在 ./out（index.html、dashboard.html、share.html …，纯静态）
 ```
 
-### 2. 在 EdgeOne 控制台准备 KV 存储
-
-1. 进入 **EdgeOne Pages → KV 存储**，新建一个命名空间（例如 `SecretBoxDB`）。
-2. 进入项目设置 → **KV 存储 / 绑定**，把该命名空间绑定到本项目，
-   **变量名必须填 `DB`**（`functions/api/[[path]].js` 认这个名字）。
-
-### 3. 设置环境变量
+### 2. 设置环境变量
 
 在项目设置 → **环境变量** 中配置：
 
@@ -44,7 +38,7 @@ node scripts/export-static.mjs
 |------|----|
 | `SESSION_SECRET` | 强随机串，用 `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"` 生成 |
 
-### 4. 部署
+### 3. 部署
 
 - **GitHub 集成**：把仓库连接到 EdgeOne Pages，构建命令填
   `node scripts/export-static.mjs`，输出目录填 `out`。`functions/` 会被自动识别。
@@ -52,7 +46,7 @@ node scripts/export-static.mjs
 
 部署后：
 - 前端页面 → EdgeOne 静态托管（`out/`）
-- `/api/*` 请求 → `functions/api/[[path]].js` → 读写 EdgeOne KV
+- `/api/*` 请求 → `functions/api/[[path]].js` → 读写 EdgeOne Blob
 
 ## 工作原理
 
@@ -71,5 +65,3 @@ n:<userId>:<nid> -> 笔记（可能为密文）
 s:<shareId>      -> { userId, noteId }   公开分享索引
 ```
 
-> 注意：EdgeOne KV 是**最终一致性**（边缘缓存最长约 60s）。登录/注册后立即读取一般没问题，
-> 但极端情况下其他节点可能有最长 60s 延迟。对个人笔记场景完全够用。

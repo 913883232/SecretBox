@@ -1,3 +1,4 @@
+import { store } from "./store-blob.js";
 /**
  * EdgeOne Pages Function 后端核心逻辑（自包含、仅依赖 EdgeOne 运行时）。
  *
@@ -5,11 +6,11 @@
  *   - 存储 key 方案（u: / k: / f: / n: / s: 前缀）
  *   - 加密信封格式（salt + wrappedKey）
  *   - 密码哈希（PBKDF2-SHA256）与会话签名（HMAC-SHA256，httpOnly Cookie）
- * 因此本地（Next.js + 文件存储）与线上（EdgeOne KV）的数据互通、行为一致。
+ * 因此本地（Next.js + 文件存储）与线上（EdgeOne Pages Blob）的数据互通、行为一致。
  *
- * 导出 handleRequest(context, kv)：
+ * 导出 handleRequest(context)：
  *   context —— EdgeOne 注入的请求上下文（含 request 等）
- *   kv      —— 已解析的 KV 命名空间绑定（变量名 DB），见入口 [[path]].js
+ *   存储由 ./store-blob.js 使用 EdgeOne Pages Blob 自动初始化。
  */
 
 const enc = new TextEncoder();
@@ -17,32 +18,6 @@ const dec = new TextDecoder();
 const PBKDF2_ITER = 200000;
 const SESSION_COOKIE = "mn_session";
 const SESSION_TTL = 7 * 24 * 60 * 60; // 秒
-
-// ---------------------------------------------------------------- KV 封装
-function makeStore(kv) {
-  return {
-    async get(key) {
-      const v = await kv.get(key, { type: "json" });
-      return v ?? null;
-    },
-    async put(key, val) {
-      await kv.put(key, JSON.stringify(val));
-    },
-    async del(key) {
-      await kv.delete(key);
-    },
-    async list(prefix) {
-      const names = [];
-      let cursor;
-      do {
-        const res = await kv.list({ prefix, limit: 256, cursor });
-        for (const k of res.keys) names.push(k.name);
-        cursor = res.complete ? undefined : res.cursor;
-      } while (cursor);
-      return names;
-    },
-  };
-}
 
 // ---------------------------------------------------------------- base64
 function b64(bytes) {
@@ -219,14 +194,7 @@ function isMutation(method) {
 }
 
 // ---------------------------------------------------------------- 主处理
-export async function handleRequest(context, kv) {
-  if (!kv) {
-    return json(
-      { error: "后端未配置 KV 绑定（变量名应为 DB）" },
-      500
-    );
-  }
-  const store = makeStore(kv);
+export async function handleRequest(context) {
   const req = context.request;
   const url = new URL(req.url);
   const path = url.pathname.replace(/\/+$/, ""); // 去掉尾部斜杠
