@@ -45,8 +45,12 @@ async function deriveBits(password, salt, iterations) {
     false,
     ["deriveBits"]
   );
+  // EdgeOne runtime requires a plain ArrayBuffer for PBKDF2 salt; a Uint8Array view is rejected (Param Invalid).
+  const saltBuf = salt instanceof ArrayBuffer
+    ? salt
+    : salt.buffer.slice(salt.byteOffset, salt.byteOffset + salt.byteLength);
   const bits = await crypto.subtle.deriveBits(
-    { name: "PBKDF2", salt, iterations, hash: "SHA-256" },
+    { name: "PBKDF2", salt: saltBuf, iterations, hash: "SHA-256" },
     base,
     256
   );
