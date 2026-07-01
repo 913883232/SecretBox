@@ -38,22 +38,24 @@ function b64u(bytes) {
 
 // ---------------------------------------------------------------- 密码哈希
 async function deriveBits(password, salt, iterations) {
-  const base = await crypto.subtle.importKey(
-    "raw",
-    enc.encode(password),
-    "PBKDF2",
-    false,
-    ["deriveBits"]
-  );
-  // EdgeOne runtime requires a plain ArrayBuffer for PBKDF2 salt; a Uint8Array view is rejected (Param Invalid).
-  const saltBuf = salt instanceof ArrayBuffer
-    ? salt
-    : salt.buffer.slice(salt.byteOffset, salt.byteOffset + salt.byteLength);
-  const bits = await crypto.subtle.deriveBits(
-    { name: "PBKDF2", salt: saltBuf, iterations, hash: "SHA-256" },
-    base,
-    256
-  );
+  const iter = Number(iterations) | 0;
+  const sView = new Uint8Array(salt instanceof ArrayBuffer ? new Uint8Array(salt) : salt);
+  const saltBuf = sView.buffer.slice(sView.byteOffset, sView.byteOffset + sView.byteLength);
+  const pwU8 = enc.encode(password);
+  const pwBuf = pwU8.buffer.slice(pwU8.byteOffset, pwU8.byteOffset + pwU8.byteLength);
+  let base;
+  try {
+    base = await crypto.subtle.importKey("raw", pwBuf, { name: "PBKDF2" }, false, ["deriveBits"]);
+  } catch (e1) {
+    try { base = await crypto.subtle.importKey("raw", pwU8, { name: "PBKDF2" }, false, ["deriveBits"]); }
+    catch (e2) { throw new Error("importKey failed: ["+e1.message+"] then ["+e2.message+"] pwBuf.len="+pwBuf.byteLength); }
+  }
+  let bits;
+  try {
+    bits = await crypto.subtle.deriveBits({ name: "PBKDF2", salt: saltBuf, iterations: iter, hash: "SHA-256" }, base, 256);
+  } catch (e3) {
+    throw new Error("deriveBits failed: "+e3.message+" | salt.len="+saltBuf.byteLength+" iter="+iter+" typeof iter="+(typeof iterations));
+  }
   return new Uint8Array(bits);
 }
 async function hashPassword(password) {
