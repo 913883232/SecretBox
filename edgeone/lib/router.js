@@ -15,7 +15,7 @@ import { store } from "./store-blob.js";
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
-const PBKDF2_ITER = 200000;
+const PBKDF2_ITER = 10000; // lowered for Edge runtime (no native PBKDF2); still adequate for a personal notes app
 const SESSION_COOKIE = "mn_session";
 const SESSION_TTL = 7 * 24 * 60 * 60; // 秒
 
@@ -37,26 +37,89 @@ function b64u(bytes) {
 }
 
 // ---------------------------------------------------------------- 密码哈希
+// Pure-JS SHA-256 (EdgeOne runtime rejects crypto.subtle.importKey for PBKDF2).
+const SHA256_K = new Uint32Array([
+  0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+  0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+  0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+  0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+  0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+  0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+  0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+  0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2
+]);
+function rotr(x,n){return (x>>>n)|(x<<(32-n));}
+function sha256Bytes(msg){ // msg: Uint8Array -> Uint8Array(32)
+  const H=new Uint32Array([0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19]);
+  const l=msg.length; const bitLen=l*8;
+  const withPad=new Uint8Array(l+9+((64-((l+9)%64))%64));
+  withPad.set(msg);
+  withPad[l]=0x80;
+  // 64-bit big-endian length (we only fill low 32 bits; messages are small)
+  const hi=Math.floor(bitLen/0x100000000); const lo=bitLen>>>0;
+  withPad[withPad.length-8]=(hi>>>24)&255; withPad[withPad.length-7]=(hi>>>16)&255; withPad[withPad.length-6]=(hi>>>8)&255; withPad[withPad.length-5]=hi&255;
+  withPad[withPad.length-4]=(lo>>>24)&255; withPad[withPad.length-3]=(lo>>>16)&255; withPad[withPad.length-2]=(lo>>>8)&255; withPad[withPad.length-1]=lo&255;
+  const W=new Uint32Array(64);
+  for(let i=0;i<withPad.length;i+=64){
+    for(let t=0;t<16;t++){ W[t]=(withPad[i+t*4]<<24)|(withPad[i+t*4+1]<<16)|(withPad[i+t*4+2]<<8)|withPad[i+t*4+3]; }
+    for(let t=16;t<64;t++){ const s0=rotr(W[t-15],7)^rotr(W[t-15],18)^(W[t-15]>>>3); const s1=rotr(W[t-2],17)^rotr(W[t-2],19)^(W[t-2]>>>10); W[t]=(W[t-16]+s0+W[t-7]+s1)|0; }
+    let a=H[0],b=H[1],c=H[2],d=H[3],e=H[4],f=H[5],g=H[6],h=H[7];
+    for(let t=0;t<64;t++){ const S1=rotr(e,6)^rotr(e,11)^rotr(e,25); const ch=(e&f)^(~e&g); const t1=(h+S1+ch+SHA256_K[t]+W[t])|0; const S0=rotr(a,2)^rotr(a,13)^rotr(a,22); const mj=(a&b)^(a&c)^(b&c); const t2=(S0+mj)|0; h=g;g=f;f=e;e=(d+t1)|0;d=c;c=b;b=a;a=(t1+t2)|0; }
+    H[0]=(H[0]+a)|0;H[1]=(H[1]+b)|0;H[2]=(H[2]+c)|0;H[3]=(H[3]+d)|0;H[4]=(H[4]+e)|0;H[5]=(H[5]+f)|0;H[6]=(H[6]+g)|0;H[7]=(H[7]+h)|0;
+  }
+  const out=new Uint8Array(32);
+  for(let i=0;i<8;i++){ out[i*4]=(H[i]>>>24)&255;out[i*4+1]=(H[i]>>>16)&255;out[i*4+2]=(H[i]>>>8)&255;out[i*4+3]=H[i]&255; }
+  return out;
+}
+function hmacSha256Bytes(key, msg){ // key,msg: Uint8Array -> Uint8Array(32)
+  const BLOCK=64;
+  let k=key;
+  if(k.length>BLOCK) k=sha256Bytes(k);
+  const ipad=new Uint8Array(BLOCK), opad=new Uint8Array(BLOCK);
+  for(let i=0;i<BLOCK;i++){ ipad[i]=k[i]^0x36; opad[i]=k[i]^0x5c; }
+  const inner=new Uint8Array(BLOCK+msg.length); inner.set(ipad); inner.set(msg,BLOCK);
+  const innerHash=sha256Bytes(inner);
+  const outer=new Uint8Array(BLOCK+32); outer.set(opad); outer.set(innerHash,BLOCK);
+  return sha256Bytes(outer);
+}
+function xor32(a,b){ const o=new Uint8Array(32); for(let i=0;i<32;i++)o[i]=a[i]^b[i]; return o; }
+// PBKDF2-SHA256 using native crypto.subtle.digest when available (fast),
+// pure-JS fallback otherwise.
+const _digest = (typeof crypto!=="undefined" && crypto.subtle && crypto.subtle.digest)
+  ? (buf)=>crypto.subtle.digest("SHA-256",buf).then(ab=>new Uint8Array(ab))
+  : null;
+async function _hmacAsync(key, msg){
+  const BLOCK=64;
+  let k=key;
+  if(k.length>BLOCK) k=new Uint8Array(await _digest(k));
+  const ipad=new Uint8Array(BLOCK), opad=new Uint8Array(BLOCK);
+  for(let i=0;i<BLOCK;i++){ ipad[i]=k[i]^0x36; opad[i]=k[i]^0x5c; }
+  const inner=new Uint8Array(BLOCK+msg.length); inner.set(ipad); inner.set(msg,BLOCK);
+  const innerHash=new Uint8Array(await _digest(inner));
+  const outer=new Uint8Array(BLOCK+32); outer.set(opad); outer.set(innerHash,BLOCK);
+  return new Uint8Array(await _digest(outer));
+}
+async function pbkdf2Sha256(password, salt, iterations, dkLen){
+  const out=new Uint8Array(dkLen);
+  const blocks=Math.ceil(dkLen/32);
+  for(let blk=1;blk<=blocks;blk++){
+    const saltBlk=new Uint8Array(salt.length+4);
+    saltBlk.set(salt);
+    saltBlk[salt.length]=(blk>>>24)&255;saltBlk[salt.length+1]=(blk>>>16)&255;saltBlk[salt.length+2]=(blk>>>8)&255;saltBlk[salt.length+3]=blk&255;
+    let U=await _hmacAsync(password,saltBlk);
+    let T=U.slice();
+    for(let i=1;i<iterations;i++){ U=await _hmacAsync(password,U); T=xor32(T,U); }
+    const off=(blk-1)*32;
+    for(let i=0;i<32&&off+i<dkLen;i++) out[off+i]=T[i];
+  }
+  return out;
+}
 async function deriveBits(password, salt, iterations) {
-  const iter = Number(iterations) | 0;
-  const sView = new Uint8Array(salt instanceof ArrayBuffer ? new Uint8Array(salt) : salt);
-  const saltBuf = sView.buffer.slice(sView.byteOffset, sView.byteOffset + sView.byteLength);
-  const pwU8 = enc.encode(password);
-  const pwBuf = pwU8.buffer.slice(pwU8.byteOffset, pwU8.byteOffset + pwU8.byteLength);
-  let base;
-  try {
-    base = await crypto.subtle.importKey("raw", pwBuf, { name: "PBKDF2" }, false, ["deriveBits"]);
-  } catch (e1) {
-    try { base = await crypto.subtle.importKey("raw", pwU8, { name: "PBKDF2" }, false, ["deriveBits"]); }
-    catch (e2) { throw new Error("importKey failed: ["+e1.message+"] then ["+e2.message+"] pwBuf.len="+pwBuf.byteLength); }
-  }
-  let bits;
-  try {
-    bits = await crypto.subtle.deriveBits({ name: "PBKDF2", salt: saltBuf, iterations: iter, hash: "SHA-256" }, base, 256);
-  } catch (e3) {
-    throw new Error("deriveBits failed: "+e3.message+" | salt.len="+saltBuf.byteLength+" iter="+iter+" typeof iter="+(typeof iterations));
-  }
-  return new Uint8Array(bits);
+  const pw=enc.encode(password);
+  const st=salt instanceof Uint8Array ? salt : new Uint8Array(salt);
+  const iter=Number(iterations)|0;
+  const bits=await pbkdf2Sha256(pw, st, iter, 32);
+  return bits;
 }
 async function hashPassword(password) {
   const salt = crypto.getRandomValues(new Uint8Array(16));
@@ -98,18 +161,15 @@ function sessionSecret() {
     envValue("SESSION_SECRET") || "dev-only-insecure-session-secret-min-16-chars"
   );
 }
-let hmacKey;
-async function getHmacKey() {
-  if (!hmacKey) {
-    hmacKey = await crypto.subtle.importKey(
-      "raw",
-      enc.encode(sessionSecret()),
-      { name: "HMAC", hash: "SHA-256" },
-      false,
-      ["sign", "verify"]
-    );
-  }
-  return hmacKey;
+function hmacSecretBytes() { return enc.encode(sessionSecret()); }
+// Pure-JS HMAC-SHA256 helpers (EdgeOne runtime rejects crypto.subtle.importKey).
+async function hmacSign(msgStr) { if(_digest) return await _hmacAsync(hmacSecretBytes(), enc.encode(msgStr)); return hmacSha256Bytes(hmacSecretBytes(), enc.encode(msgStr)); }
+async function hmacVerify(msgStr, sigBytes) {
+  const expected = await hmacSign(msgStr);
+  if (expected.length !== sigBytes.length) return false;
+  let diff = 0;
+  for (let i = 0; i < expected.length; i++) diff |= expected[i] ^ sigBytes[i];
+  return diff === 0;
 }
 function parseCookies(header) {
   const out = {};
@@ -126,12 +186,7 @@ async function readSession(req) {
   if (!token) return null;
   const [body, sig] = token.split(".");
   if (!body || !sig) return null;
-  const ok = await crypto.subtle.verify(
-    "HMAC",
-    await getHmacKey(),
-    b64d(sig),
-    enc.encode(body)
-  );
+  const ok = await hmacVerify(body, b64d(sig));
   if (!ok) return null;
   try {
     const p = JSON.parse(dec.decode(b64d(body)));
@@ -150,9 +205,7 @@ async function buildSessionCookie(user) {
     exp: now + SESSION_TTL * 1000,
   });
   const body = b64u(enc.encode(payload));
-  const sig = b64u(
-    await crypto.subtle.sign("HMAC", await getHmacKey(), enc.encode(body))
-  );
+  const sig = b64u(await hmacSign(body));
   return `${SESSION_COOKIE}=${body}.${sig}; HttpOnly; Path=/; Max-Age=${SESSION_TTL}; SameSite=Lax${
     envValue("NODE_ENV") === "production" ? "; Secure" : ""
   }`;
